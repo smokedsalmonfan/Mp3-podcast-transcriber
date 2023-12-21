@@ -1,0 +1,109 @@
+import requests
+import json
+
+from pydub import AudioSegment
+from io import BytesIO
+from docx import Document
+
+WIT_AI_ENDPOINT = "https://api.wit.ai/speech"
+wit_ai_token = "" 
+# Get your own Wit API key
+CHUNK_LENGTH = 5000  # 5 seconds in milliseconds
+
+def transcribe_audio_chunk(audio_chunk, wit_ai_token):
+    # Convert audio_chunk to a byte-like object
+    buffer = BytesIO()
+    audio_chunk.export(buffer, format="mp3")
+    audio_data = buffer.getvalue()
+
+    headers = {
+        'Authorization': 'Bearer ' + wit_ai_token,
+        'Content-Type': 'audio/mpeg3'
+    }
+
+    response = requests.post(WIT_AI_ENDPOINT, headers=headers, data=audio_data, stream=True)
+
+    texts = []
+    buffer = ""
+    for line in response.iter_lines():
+        # Append the line to our buffer
+        buffer += line.decode('utf-8')
+        try:
+            # Try to parse the accumulated buffer as JSON
+            data = json.loads(buffer)
+            if 'text' in data:
+                texts.append(data['text'])
+            # If successful, reset the buffer for the next JSON object
+            buffer = ""
+        except json.JSONDecodeError:
+            # If not successful, continue accumulating the buffer
+            pass
+
+    # At the end of the loop, we might have a valid JSON left in the buffer, so let's try to parse that too
+    if buffer:
+        try:
+            data = json.loads(buffer)
+            if 'text' in data:
+                texts.append(data['text'])
+        except json.JSONDecodeError:
+            pass
+
+    return texts[-1] if texts else ""
+
+
+def transcribe_podcast(url, wit_ai_token):
+    # Download the audio file from the provided URL
+    audio_content = requests.get(url).content
+    with open("temp_podcast.mp3", "wb") as f:
+        f.write(audio_content)
+
+    # Load the audio file using pydub
+    audio = AudioSegment.from_mp3("temp_podcast.mp3")
+
+    # Split the audio into chunks
+    num_chunks = len(audio) // CHUNK_LENGTH + (1 if len(audio) % CHUNK_LENGTH != 0 else 0)
+    transcripts = []
+
+    for i in range(num_chunks):
+        chunk = audio[i * CHUNK_LENGTH: (i+1) * CHUNK_LENGTH]
+        transcript = transcribe_audio_chunk(chunk, wit_ai_token)
+        transcripts.append(transcript)
+
+    return " ".join(transcripts)
+
+
+def save_transcript_to_word(transcript,filename):
+    doc = Document()
+    doc.add_heading('Podcast Transcript', level=1)
+
+    # Add timestamps and potentially identify new speakers
+    paragraphs = transcript.split('. ')
+    timestamp_minutes = 0
+    for index, para in enumerate(paragraphs):
+        # Add a timestamp every 60 sentences (assuming about a minute per chunk)
+        if index % 60 == 0:
+            doc.add_paragraph(f"[{timestamp_minutes}:00]")
+            timestamp_minutes += 1
+
+        para_text = para.strip() + '.'
+        doc.add_paragraph(para_text)
+
+        # If the paragraph is short, it might indicate a change in speaker
+        # This is a basic heuristic and may not be accurate
+        if len(para_text.split()) <= 3:
+            doc.add_paragraph("---")
+
+    doc.save(output_filename)
+
+
+# Get the name of the MP3 file from the user
+mp3_file = input("Enter the name of the MP3 file: ")
+
+# Transcribe the podcast
+transcript = transcribe_podcast(mp3_file, wit_ai_token)
+
+# Generate the output filename based on the first three words of the transcript
+output_filename = "_".join(transcript.split()[:3]) + "_transcript.docx"
+
+# Save the transcript to a Word document with the generated filename
+save_transcript_to_word(transcript, output_filename)
